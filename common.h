@@ -4,27 +4,79 @@
 #ifndef REDIS_COMMON_H
 #define REDIS_COMMON_H
 
-#define PHPREDIS_CTX_PTR ((void *)0xDEADC0DE)
+#include "php_compat.h"
+
 #define PHPREDIS_NOTUSED(v) ((void)v)
 
 #include "zend_llist.h"
 #include <ext/standard/php_var.h>
 #include <ext/standard/php_math.h>
 #include <zend_smart_str.h>
-#include <ext/standard/php_smart_string.h>
+#include <zend_smart_string.h>
 
-#define PHPREDIS_GET_OBJECT(class_entry, o) (class_entry *)((char *)o - XtOffsetOf(class_entry, std))
-#define PHPREDIS_ZVAL_GET_OBJECT(class_entry, z) PHPREDIS_GET_OBJECT(class_entry, Z_OBJ_P(z))
+#define PHPREDIS_GET_OBJECT(class_entry, o) (class_entry *)((char *)o - offsetof(class_entry, std))
+#define PHPREDIS_ZVAL_GET_OBJECT(class_entry, z) PHPREDIS_GET_OBJECT(class_entry, phpredis_zval_object(z))
 
-/* NULL check so Eclipse doesn't go crazy */
-#ifndef NULL
-#define NULL   ((void *) 0)
+static zend_always_inline zend_object *phpredis_zval_object(zval *zv) {
+    ZEND_ASSERT(zv != NULL);
+    ZEND_ASSERT(Z_TYPE_P(zv) == IS_OBJECT);
+    return Z_OBJ_P(zv);
+}
+
+/* We'll fallthrough if we want to */
+#ifndef __has_attribute
+#define __has_attribute(x) 0
 #endif
+#if __has_attribute(__fallthrough__)
+#define REDIS_FALLTHROUGH __attribute__((__fallthrough__))
+#else
+#define REDIS_FALLTHROUGH do { } while (0)
+#endif
+
+#if defined(_WIN32) || defined(_WIN64)
+# define PHPREDIS_LITTLE_ENDIAN
+#elif defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
+# define PHPREDIS_BIG_ENDIAN
+#elif defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
+# define PHPREDIS_LITTLE_ENDIAN
+#else
+# error "Unknown endianness"
+#endif
+
+#if defined(_MSC_VER) && !defined(__clang__)
+#  define REDIS_MSVC 1
+#endif
+
+#ifndef REDIS_MSVC
+#  ifndef REDIS_NODISCARD
+#    if defined(__has_c_attribute)
+#      if __has_c_attribute(nodiscard)
+#        define REDIS_NODISCARD [[nodiscard]]
+#      endif
+#    endif
+#  endif
+#  ifndef REDIS_NODISCARD
+#    if defined(__has_attribute)
+#      if __has_attribute(warn_unused_result)
+#        define REDIS_NODISCARD __attribute__((warn_unused_result))
+#      endif
+#    elif defined(__GNUC__) || defined(__clang__)
+#      define REDIS_NODISCARD __attribute__((warn_unused_result))
+#    endif
+#  endif
+#endif /* ifndef REDIS_MSVC */
+
+#ifndef REDIS_NODISCARD
+#  define REDIS_NODISCARD
+#endif
+
+#include "backoff.h"
 
 typedef enum {
     REDIS_SOCK_STATUS_FAILED = -1,
     REDIS_SOCK_STATUS_DISCONNECTED,
     REDIS_SOCK_STATUS_CONNECTED,
+    REDIS_SOCK_STATUS_AUTHENTICATED,
     REDIS_SOCK_STATUS_READY
 } redis_sock_status;
 
@@ -38,6 +90,7 @@ typedef enum {
 #define REDIS_ZSET      4
 #define REDIS_HASH      5
 #define REDIS_STREAM    6
+#define REDIS_VECTORSET 7
 
 #ifdef PHP_WIN32
 #define PHP_REDIS_API __declspec(dllexport)
@@ -72,17 +125,27 @@ typedef enum _PUBSUB_TYPE {
     PUBSUB_NUMPAT
 } PUBSUB_TYPE;
 
+#define REDIS_SUBSCRIBE_IDX  0
+#define REDIS_PSUBSCRIBE_IDX 1
+#define REDIS_SSUBSCRIBE_IDX 2
+#define REDIS_SUBS_BUCKETS   3
+
 /* options */
-#define REDIS_OPT_SERIALIZER         1
-#define REDIS_OPT_PREFIX             2
-#define REDIS_OPT_READ_TIMEOUT       3
-#define REDIS_OPT_SCAN               4
-#define REDIS_OPT_FAILOVER           5
-#define REDIS_OPT_TCP_KEEPALIVE      6
-#define REDIS_OPT_COMPRESSION        7
-#define REDIS_OPT_REPLY_LITERAL      8
-#define REDIS_OPT_COMPRESSION_LEVEL  9
-#define REDIS_OPT_NULL_MBULK_AS_NULL 10
+#define REDIS_OPT_SERIALIZER          1
+#define REDIS_OPT_PREFIX              2
+#define REDIS_OPT_READ_TIMEOUT        3
+#define REDIS_OPT_SCAN                4
+#define REDIS_OPT_FAILOVER            5
+#define REDIS_OPT_TCP_KEEPALIVE       6
+#define REDIS_OPT_COMPRESSION         7
+#define REDIS_OPT_REPLY_LITERAL       8
+#define REDIS_OPT_COMPRESSION_LEVEL   9
+#define REDIS_OPT_NULL_MBULK_AS_NULL  10
+#define REDIS_OPT_MAX_RETRIES         11
+#define REDIS_OPT_BACKOFF_ALGORITHM   12
+#define REDIS_OPT_BACKOFF_BASE        13
+#define REDIS_OPT_BACKOFF_CAP         14
+#define REDIS_OPT_PACK_IGNORE_NUMBERS 15
 
 /* cluster options */
 #define REDIS_FAILOVER_NONE              0
@@ -95,7 +158,8 @@ typedef enum {
     REDIS_SERIALIZER_PHP,
     REDIS_SERIALIZER_IGBINARY,
     REDIS_SERIALIZER_MSGPACK,
-    REDIS_SERIALIZER_JSON
+    REDIS_SERIALIZER_JSON,
+    REDIS_SERIALIZER_PHPSER
 } redis_serializer;
 /* compression */
 #define REDIS_COMPRESSION_NONE 0
@@ -109,6 +173,16 @@ typedef enum {
 #define REDIS_SCAN_PREFIX  2
 #define REDIS_SCAN_NOPREFIX 3
 
+/* BACKOFF_ALGORITHM options */
+#define REDIS_BACKOFF_ALGORITHMS                    7
+#define REDIS_BACKOFF_ALGORITHM_DEFAULT             0
+#define REDIS_BACKOFF_ALGORITHM_DECORRELATED_JITTER 1
+#define REDIS_BACKOFF_ALGORITHM_FULL_JITTER         2
+#define REDIS_BACKOFF_ALGORITHM_EQUAL_JITTER        3
+#define REDIS_BACKOFF_ALGORITHM_EXPONENTIAL         4
+#define REDIS_BACKOFF_ALGORITHM_UNIFORM             5
+#define REDIS_BACKOFF_ALGORITHM_CONSTANT            6
+
 /* GETBIT/SETBIT offset range limits */
 #define BITOP_MIN_OFFSET 0
 #define BITOP_MAX_OFFSET 4294967295U
@@ -118,132 +192,38 @@ typedef enum {
 #define MULTI    1
 #define PIPELINE 2
 
-#define IS_ATOMIC(redis_sock) (redis_sock->mode == ATOMIC)
-#define IS_MULTI(redis_sock) (redis_sock->mode & MULTI)
-#define IS_PIPELINE(redis_sock) (redis_sock->mode & PIPELINE)
+#define PHPREDIS_DEBUG_LOGGING 0
 
-#define PIPELINE_ENQUEUE_COMMAND(cmd, cmd_len) do { \
-    if (redis_sock->pipeline_cmd == NULL) { \
-        redis_sock->pipeline_cmd = zend_string_init(cmd, cmd_len, 0); \
-    } else { \
-        size_t pipeline_len = ZSTR_LEN(redis_sock->pipeline_cmd); \
-        redis_sock->pipeline_cmd = zend_string_realloc(redis_sock->pipeline_cmd, pipeline_len + cmd_len, 0); \
-        memcpy(&ZSTR_VAL(redis_sock->pipeline_cmd)[pipeline_len], cmd, cmd_len); \
-    } \
-} while (0)
+#if PHPREDIS_DEBUG_LOGGING == 1
+#define redisDbgFmt(fmt, ...) \
+    php_printf("%s:%d:%s(): " fmt "\n", __FILE__, __LINE__, __func__, __VA_ARGS__)
+#define redisDbgStr(str) redisDbgFmt("%s", str)
+#else
+#define redisDbgFmt(fmt, ...) ((void)0)
+#define redisDbgStr(str) ((void)0)
+#endif
 
-#define SOCKET_WRITE_COMMAND(redis_sock, cmd, cmd_len) \
-    if(redis_sock_write(redis_sock, cmd, cmd_len) < 0) { \
-    efree(cmd); \
-    RETURN_FALSE; \
+/* On some versions of glibc strncmp and strncasecmp can be a macro a macro.
+ * This wrapper allows us to use it in combination with ZEND_STRL in those
+ * cases. */
+static zend_always_inline int redis_strncmp(const char *s1, const char *s2, size_t n) {
+    return strncmp(s1, s2, n);
+}
+static zend_always_inline int redis_strncasecmp(const char *s1, const char *s2, size_t n) {
+    return strncasecmp(s1, s2, n);
 }
 
-#define REDIS_SAVE_CALLBACK(callback, closure_context) do { \
-    fold_item *fi = malloc(sizeof(fold_item)); \
-    fi->fun = callback; \
-    fi->ctx = closure_context; \
-    fi->next = NULL; \
-    if (redis_sock->current) { \
-        redis_sock->current->next = fi; \
-    } \
-    redis_sock->current = fi; \
-    if (NULL == redis_sock->head) { \
-        redis_sock->head = redis_sock->current; \
-    } \
-} while (0)
-
-#define REDIS_PROCESS_REQUEST(redis_sock, cmd, cmd_len) \
-    if (IS_PIPELINE(redis_sock)) { \
-        PIPELINE_ENQUEUE_COMMAND(cmd, cmd_len); \
-    } else { \
-        SOCKET_WRITE_COMMAND(redis_sock, cmd, cmd_len); \
-    } \
-    efree(cmd);
-
-#define REDIS_PROCESS_RESPONSE_CLOSURE(function, closure_context) \
-    if (!IS_PIPELINE(redis_sock)) { \
-        if (redis_response_enqueued(redis_sock) != SUCCESS) { \
-            RETURN_FALSE; \
-        } \
-    } \
-    REDIS_SAVE_CALLBACK(function, closure_context); \
-    RETURN_ZVAL(getThis(), 1, 0); \
-
-#define REDIS_PROCESS_RESPONSE(function) else { \
-    REDIS_PROCESS_RESPONSE_CLOSURE(function, NULL) \
+static zend_always_inline zend_bool
+redis_str_eq(const char *s, size_t len, const char *cmp, size_t cmp_len)
+{
+    return len == cmp_len && redis_strncmp(s, cmp, len) == 0;
 }
 
-/* Clear redirection info */
-#define REDIS_MOVED_CLEAR(redis_sock) \
-    redis_sock->redir_slot = 0; \
-    redis_sock->redir_port = 0; \
-    redis_sock->redir_type = MOVED_NONE; \
-
-/* Process a command assuming our command where our command building
- * function is redis_<cmdname>_cmd */
-#define REDIS_PROCESS_CMD(cmdname, resp_func) \
-    RedisSock *redis_sock; char *cmd; int cmd_len; void *ctx=NULL; \
-    if ((redis_sock = redis_sock_get(getThis(), 0)) == NULL || \
-       redis_##cmdname##_cmd(INTERNAL_FUNCTION_PARAM_PASSTHRU,redis_sock, \
-                             &cmd, &cmd_len, NULL, &ctx)==FAILURE) { \
-            RETURN_FALSE; \
-    } \
-    REDIS_PROCESS_REQUEST(redis_sock, cmd, cmd_len); \
-    if (IS_ATOMIC(redis_sock)) { \
-        resp_func(INTERNAL_FUNCTION_PARAM_PASSTHRU, redis_sock, NULL, ctx); \
-    } else { \
-        REDIS_PROCESS_RESPONSE_CLOSURE(resp_func, ctx) \
-    }
-
-/* Process a command but with a specific command building function
- * and keyword which is passed to us*/
-#define REDIS_PROCESS_KW_CMD(kw, cmdfunc, resp_func) \
-    RedisSock *redis_sock; char *cmd; int cmd_len; void *ctx=NULL; \
-    if ((redis_sock = redis_sock_get(getThis(), 0)) == NULL || \
-       cmdfunc(INTERNAL_FUNCTION_PARAM_PASSTHRU, redis_sock, kw, &cmd, \
-               &cmd_len, NULL, &ctx)==FAILURE) { \
-            RETURN_FALSE; \
-    } \
-    REDIS_PROCESS_REQUEST(redis_sock, cmd, cmd_len); \
-    if (IS_ATOMIC(redis_sock)) { \
-        resp_func(INTERNAL_FUNCTION_PARAM_PASSTHRU, redis_sock, NULL, ctx); \
-    } else { \
-        REDIS_PROCESS_RESPONSE_CLOSURE(resp_func, ctx) \
-    }
-
-/* Case sensitive compare against compile-time static string */
-#define REDIS_STRCMP_STATIC(s, len, sstr) \
-    (len == sizeof(sstr) - 1 && !strncmp(s, sstr, len))
-
-/* Case insensitive compare against compile-time static string */
-#define REDIS_STRICMP_STATIC(s, len, sstr) \
-    (len == sizeof(sstr) - 1 && !strncasecmp(s, sstr, len))
-
-/* Test if a zval is a string and (case insensitive) matches a static string */
-#define ZVAL_STRICMP_STATIC(zv, sstr) \
-    REDIS_STRICMP_STATIC(Z_STRVAL_P(zv), Z_STRLEN_P(zv), sstr)
-
-/* Case insensitive compare of a zend_string to a static string */
-#define ZSTR_STRICMP_STATIC(zs, sstr) \
-    REDIS_STRICMP_STATIC(ZSTR_VAL(zs), ZSTR_LEN(zs), sstr)
-
-/* Extended SET argument detection */
-#define ZSTR_IS_EX_ARG(zs) ZSTR_STRICMP_STATIC(zs, "EX")
-#define ZSTR_IS_PX_ARG(zs) ZSTR_STRICMP_STATIC(zs, "PX")
-#define ZSTR_IS_NX_ARG(zs) ZSTR_STRICMP_STATIC(zs, "NX")
-#define ZSTR_IS_XX_ARG(zs) ZSTR_STRICMP_STATIC(zs, "XX")
-
-#define ZVAL_IS_NX_XX_ARG(zv) (ZVAL_STRICMP_STATIC(zv, "NX") || ZVAL_STRICMP_STATIC(zv, "XX"))
-#define ZSTR_IS_EX_PX_ARG(a) (ZSTR_IS_EX_ARG(a) || ZSTR_IS_PX_ARG(a))
-
-/* Given a string and length, validate a zRangeByLex argument.  The semantics
- * here are that the argument must start with '(' or '[' or be just the char
- * '+' or '-' */
-#define IS_LEX_ARG(s,l) \
-    (l>0 && (*s=='(' || *s=='[' || (l==1 && (*s=='+' || *s=='-'))))
-
-#define REDIS_ENABLE_MODE(redis_sock, m) (redis_sock->mode |= m)
-#define REDIS_DISABLE_MODE(redis_sock, m) (redis_sock->mode &= ~m)
+static zend_always_inline zend_bool
+redis_str_ieq(const char *s, size_t len, const char *cmp, size_t cmp_len)
+{
+    return len == cmp_len && redis_strncasecmp(s, cmp, len) == 0;
+}
 
 /* HOST_NAME_MAX doesn't exist everywhere */
 #ifndef HOST_NAME_MAX
@@ -256,54 +236,138 @@ typedef enum {
     #endif
 #endif
 
+/* Complete representation for various commands in RESP */
+#define RESP_MULTI_CMD         "*1\r\n$5\r\nMULTI\r\n"
+#define RESP_EXEC_CMD          "*1\r\n$4\r\nEXEC\r\n"
+#define RESP_DISCARD_CMD       "*1\r\n$7\r\nDISCARD\r\n"
+
+typedef struct RedisHello {
+    zend_string *server;
+    zend_string *version;
+} RedisHello;
+
+typedef enum RedisSockType {
+    REDIS_SOCK_STANDALONE,
+    REDIS_SOCK_ARRAY,
+    REDIS_SOCK_CLUSTER,
+    REDIS_SOCK_SENTINEL,
+    REDIS_SOCK_SESSION
+} RedisSockType;
+
 /* {{{ struct RedisSock */
 typedef struct {
-    php_stream         *stream;
-    php_stream_context *stream_ctx;
-    zend_string        *host;
-    int                port;
-    zend_string        *user;
-    zend_string        *pass;
-    double             timeout;
-    double             read_timeout;
-    long               retry_interval;
-    redis_sock_status  status;
-    int                persistent;
-    int                watching;
-    zend_string        *persistent_id;
+    RedisSockType       type;
+    php_stream          *stream;
+    zend_string         *host;
+    int                 port;
+    zend_string         *user;
+    zend_string         *pass;
+    HashTable           *context;
+    double              timeout;
+    double              read_timeout;
+    long                retry_interval;
+    int                 max_retries;
+    struct RedisBackoff backoff;
+    redis_sock_status   status;
+    zend_bool           persistent;
+    zend_bool           watching;
+    zend_string         *persistent_id;
+    HashTable           *subs[REDIS_SUBS_BUCKETS];
+    redis_serializer    serializer;
+    zend_bool           pack_ignore_numbers;
+    int                 compression;
+    int                 compression_level;
+    long                dbNumber;
+    zend_string         *prefix;
+    struct RedisHello   hello;
+    short               mode;
+    struct fold_item    *reply_callback;
+    size_t              reply_callback_count;
+    size_t              reply_callback_capacity;
+    smart_string        pipeline_cmd;
 
-    redis_serializer   serializer;
-    int                compression;
-    int                compression_level;
-    long               dbNumber;
+    zend_string         *err;
+    int                 scan;
 
-    zend_string        *prefix;
-
-    short              mode;
-    struct fold_item   *head;
-    struct fold_item   *current;
-
-    zend_string        *pipeline_cmd;
-
-    zend_string        *err;
-
-    int                scan;
-
-    int                readonly;
-    int                reply_literal;
-    int                null_mbulk_as_null;
-    int                tcp_keepalive;
+    zend_bool           readonly;
+    zend_bool           reply_literal;
+    zend_bool           null_mbulk_as_null;
+    zend_bool           tcp_keepalive;
+    size_t              txBytes;
+    size_t              rxBytes;
+    uint8_t             flags;
 } RedisSock;
 /* }}} */
 
+static zend_always_inline zend_bool redis_sock_is_atomic(const RedisSock *redis_sock) {
+    return redis_sock->mode == ATOMIC;
+}
+
+static zend_always_inline zend_bool redis_sock_is_multi(const RedisSock *redis_sock) {
+    return (redis_sock->mode & MULTI) != 0;
+}
+
+static zend_always_inline zend_bool redis_sock_is_pipeline(const RedisSock *redis_sock) {
+    return (redis_sock->mode & PIPELINE) != 0;
+}
+
+/* Reply interpretation shared by Redis and RedisCluster. DEFAULT means the
+ * command's normal reply; multiway dispatchers select an explicit mode. */
+typedef enum RedisCtxMode {
+    REDIS_CTX_DEFAULT = 0,
+    REDIS_CTX_BOOL,
+    REDIS_CTX_STRING,
+    REDIS_CTX_LONG,
+    REDIS_CTX_VARIANT,
+    REDIS_CTX_MULTIBULK_RAW,
+    REDIS_CTX_ZIPPED_RAW,
+    REDIS_CTX_ZIPPED_INT,
+    REDIS_CTX_VARIANT_STRINGS,
+    REDIS_CTX_ACL_GETUSER,
+    REDIS_CTX_ACL_LOG,
+    REDIS_CTX_CLIENT_INFO,
+    REDIS_CTX_CLIENT_LIST,
+    REDIS_CTX_CLIENT_TRACKINGINFO,
+    REDIS_CTX_COMMAND_INFO,
+    REDIS_CTX_FUNCTION,
+    REDIS_CTX_COUNT,
+    REDIS_CTX_WITHSCORES,
+    REDIS_CTX_WITHVALUES,
+    REDIS_CTX_INCR,
+    REDIS_CTX_XAUTOCLAIM,
+    REDIS_CTX_DECODE_JSON,
+    REDIS_CTX_HELLO_SERVER,
+    REDIS_CTX_HELLO_VERSION,
+} RedisCtxMode;
+
+typedef void (RedisCmdCtxDtor)(void *ptr);
+/* The command and its reply handler agree on the active union member.
+ * A destructor is valid only with ptr; borrowed pointers may have no destructor. */
+typedef struct RedisCmdCtx {
+    union {
+        void *ptr;
+        RedisCtxMode mode;
+    };
+    RedisCmdCtxDtor *dtor;
+} RedisCmdCtx;
+
+extern const RedisCmdCtx redis_empty_ctx;
+
 /* Redis response handler function callback prototype */
-typedef void (*ResultCallback)(INTERNAL_FUNCTION_PARAMETERS, RedisSock *redis_sock, zval *z_tab, void *ctx);
-typedef int (*FailableResultCallback)(INTERNAL_FUNCTION_PARAMETERS, RedisSock*, zval*, void*);
+typedef void (*ResultCallback)(INTERNAL_FUNCTION_PARAMETERS,
+    RedisSock*, zval*, RedisCmdCtx);
+typedef int (*FailableResultCallback)(INTERNAL_FUNCTION_PARAMETERS,
+    RedisSock*, zval*, RedisCmdCtx);
+
+static zend_always_inline void redis_cmd_ctx_free(RedisCmdCtx ctx) {
+    if (ctx.dtor)
+        ctx.dtor(ctx.ptr);
+}
 
 typedef struct fold_item {
     FailableResultCallback fun;
-    void *ctx;
-    struct fold_item *next;
+    RedisCmdCtx ctx;
+    uint8_t flags;
 } fold_item;
 
 typedef struct {
@@ -315,433 +379,5 @@ typedef struct {
     RedisSock *sock;
     zend_object std;
 } redis_object;
-
-/** Argument info for any function expecting 0 args */
-ZEND_BEGIN_ARG_INFO_EX(arginfo_void, 0, 0, 0)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_key, 0, 0, 1)
-    ZEND_ARG_INFO(0, key)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_value, 0, 0, 1)
-    ZEND_ARG_INFO(0, value)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_key_value, 0, 0, 2)
-    ZEND_ARG_INFO(0, key)
-    ZEND_ARG_INFO(0, value)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_key_expire_value, 0, 0, 3)
-    ZEND_ARG_INFO(0, key)
-    ZEND_ARG_INFO(0, expire)
-    ZEND_ARG_INFO(0, value)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_key_newkey, 0, 0, 2)
-    ZEND_ARG_INFO(0, key)
-    ZEND_ARG_INFO(0, newkey)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_pairs, 0, 0, 1)
-    ZEND_ARG_ARRAY_INFO(0, pairs, 0)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_nkeys, 0, 0, 1)
-    ZEND_ARG_INFO(0, key)
-    ZEND_ARG_VARIADIC_INFO(0, other_keys)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_dst_nkeys, 0, 0, 2)
-    ZEND_ARG_INFO(0, dst)
-    ZEND_ARG_INFO(0, key)
-    ZEND_ARG_VARIADIC_INFO(0, other_keys)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_key_min_max, 0, 0, 3)
-    ZEND_ARG_INFO(0, key)
-    ZEND_ARG_INFO(0, min)
-    ZEND_ARG_INFO(0, max)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_key_member, 0, 0, 2)
-    ZEND_ARG_INFO(0, key)
-    ZEND_ARG_INFO(0, member)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_key_member_value, 0, 0, 3)
-    ZEND_ARG_INFO(0, key)
-    ZEND_ARG_INFO(0, member)
-    ZEND_ARG_INFO(0, value)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_key_members, 0, 0, 2)
-    ZEND_ARG_INFO(0, key)
-    ZEND_ARG_INFO(0, member)
-    ZEND_ARG_VARIADIC_INFO(0, other_members)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_key_timestamp, 0, 0, 2)
-    ZEND_ARG_INFO(0, key)
-    ZEND_ARG_INFO(0, timestamp)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_key_offset, 0, 0, 2)
-    ZEND_ARG_INFO(0, key)
-    ZEND_ARG_INFO(0, offset)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_key_offset_value, 0, 0, 3)
-    ZEND_ARG_INFO(0, key)
-    ZEND_ARG_INFO(0, offset)
-    ZEND_ARG_INFO(0, value)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_swapdb, 0, 0, 2)
-    ZEND_ARG_INFO(0, srcdb)
-    ZEND_ARG_INFO(0, dstdb)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_key_start_end, 0, 0, 3)
-    ZEND_ARG_INFO(0, key)
-    ZEND_ARG_INFO(0, start)
-    ZEND_ARG_INFO(0, end)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_echo, 0, 0, 1)
-    ZEND_ARG_INFO(0, msg)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_expire, 0, 0, 2)
-    ZEND_ARG_INFO(0, key)
-    ZEND_ARG_INFO(0, timeout)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_set, 0, 0, 2)
-    ZEND_ARG_INFO(0, key)
-    ZEND_ARG_INFO(0, value)
-    ZEND_ARG_INFO(0, opts)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_lset, 0, 0, 3)
-    ZEND_ARG_INFO(0, key)
-    ZEND_ARG_INFO(0, index)
-    ZEND_ARG_INFO(0, value)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_blrpop, 0, 0, 2)
-    ZEND_ARG_INFO(0, key)
-    ZEND_ARG_INFO(0, timeout_or_key)
-    ZEND_ARG_VARIADIC_INFO(0, extra_args)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_linsert, 0, 0, 4)
-    ZEND_ARG_INFO(0, key)
-    ZEND_ARG_INFO(0, position)
-    ZEND_ARG_INFO(0, pivot)
-    ZEND_ARG_INFO(0, value)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_lindex, 0, 0, 2)
-    ZEND_ARG_INFO(0, key)
-    ZEND_ARG_INFO(0, index)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_brpoplpush, 0, 0, 3)
-    ZEND_ARG_INFO(0, src)
-    ZEND_ARG_INFO(0, dst)
-    ZEND_ARG_INFO(0, timeout)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_rpoplpush, 0, 0, 2)
-    ZEND_ARG_INFO(0, src)
-    ZEND_ARG_INFO(0, dst)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_sadd_array, 0, 0, 2)
-    ZEND_ARG_INFO(0, key)
-    ZEND_ARG_ARRAY_INFO(0, options, 0)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_srand_member, 0, 0, 1)
-    ZEND_ARG_INFO(0, key)
-    ZEND_ARG_INFO(0, count)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_zadd, 0, 0, 3)
-    ZEND_ARG_INFO(0, key)
-    ZEND_ARG_INFO(0, score)
-    ZEND_ARG_INFO(0, value)
-    ZEND_ARG_VARIADIC_INFO(0, extra_args)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_zincrby, 0, 0, 3)
-    ZEND_ARG_INFO(0, key)
-    ZEND_ARG_INFO(0, value)
-    ZEND_ARG_INFO(0, member)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_hmget, 0, 0, 2)
-    ZEND_ARG_INFO(0, key)
-    ZEND_ARG_ARRAY_INFO(0, keys, 0)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_hmset, 0, 0, 2)
-    ZEND_ARG_INFO(0, key)
-    ZEND_ARG_ARRAY_INFO(0, pairs, 0)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_bitop, 0, 0, 3)
-    ZEND_ARG_INFO(0, operation)
-    ZEND_ARG_INFO(0, ret_key)
-    ZEND_ARG_INFO(0, key)
-    ZEND_ARG_VARIADIC_INFO(0, other_keys)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_bitpos, 0, 0, 2)
-    ZEND_ARG_INFO(0, key)
-    ZEND_ARG_INFO(0, bit)
-    ZEND_ARG_INFO(0, start)
-    ZEND_ARG_INFO(0, end)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_ltrim, 0, 0, 3)
-    ZEND_ARG_INFO(0, key)
-    ZEND_ARG_INFO(0, start)
-    ZEND_ARG_INFO(0, stop)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_publish, 0, 0, 2)
-    ZEND_ARG_INFO(0, channel)
-    ZEND_ARG_INFO(0, message)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_pfadd, 0, 0, 2)
-    ZEND_ARG_INFO(0, key)
-    ZEND_ARG_ARRAY_INFO(0, elements, 0)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_pfmerge, 0, 0, 2)
-    ZEND_ARG_INFO(0, dstkey)
-    ZEND_ARG_ARRAY_INFO(0, keys, 0)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_restore, 0, 0, 3)
-    ZEND_ARG_INFO(0, ttl)
-    ZEND_ARG_INFO(0, key)
-    ZEND_ARG_INFO(0, value)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_smove, 0, 0, 3)
-    ZEND_ARG_INFO(0, src)
-    ZEND_ARG_INFO(0, dst)
-    ZEND_ARG_INFO(0, value)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_zrange, 0, 0, 3)
-    ZEND_ARG_INFO(0, key)
-    ZEND_ARG_INFO(0, start)
-    ZEND_ARG_INFO(0, end)
-    ZEND_ARG_INFO(0, scores)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_zrangebyscore, 0, 0, 3)
-    ZEND_ARG_INFO(0, key)
-    ZEND_ARG_INFO(0, start)
-    ZEND_ARG_INFO(0, end)
-    ZEND_ARG_ARRAY_INFO(0, options, 0)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_zrangebylex, 0, 0, 3)
-    ZEND_ARG_INFO(0, key)
-    ZEND_ARG_INFO(0, min)
-    ZEND_ARG_INFO(0, max)
-    ZEND_ARG_INFO(0, offset)
-    ZEND_ARG_INFO(0, limit)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_zstore, 0, 0, 2)
-    ZEND_ARG_INFO(0, key)
-    ZEND_ARG_ARRAY_INFO(0, keys, 0)
-    ZEND_ARG_ARRAY_INFO(0, weights, 1)
-    ZEND_ARG_INFO(0, aggregate)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_sort, 0, 0, 1)
-    ZEND_ARG_INFO(0, key)
-    ZEND_ARG_ARRAY_INFO(0, options, 0)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_object, 0, 0, 2)
-    ZEND_ARG_INFO(0, field)
-    ZEND_ARG_INFO(0, key)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_subscribe, 0, 0, 2)
-    ZEND_ARG_ARRAY_INFO(0, channels, 0)
-    ZEND_ARG_INFO(0, callback)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_psubscribe, 0, 0, 2)
-    ZEND_ARG_ARRAY_INFO(0, patterns, 0)
-    ZEND_ARG_INFO(0, callback)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_unsubscribe, 0, 0, 1)
-    ZEND_ARG_INFO(0, channel)
-    ZEND_ARG_VARIADIC_INFO(0, other_channels)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_punsubscribe, 0, 0, 1)
-    ZEND_ARG_INFO(0, pattern)
-    ZEND_ARG_VARIADIC_INFO(0, other_patterns)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_eval, 0, 0, 1)
-    ZEND_ARG_INFO(0, script)
-    ZEND_ARG_INFO(0, args)
-    ZEND_ARG_INFO(0, num_keys)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_evalsha, 0, 0, 1)
-    ZEND_ARG_INFO(0, script_sha)
-    ZEND_ARG_INFO(0, args)
-    ZEND_ARG_INFO(0, num_keys)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_getoption, 0, 0, 1)
-    ZEND_ARG_INFO(0, option)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_setoption, 0, 0, 2)
-    ZEND_ARG_INFO(0, option)
-    ZEND_ARG_INFO(0, value)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_watch, 0, 0, 1)
-    ZEND_ARG_INFO(0, key)
-    ZEND_ARG_VARIADIC_INFO(0, other_keys)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_command, 0, 0, 0)
-    ZEND_ARG_VARIADIC_INFO(0, args)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_rawcommand, 0, 0, 1)
-    ZEND_ARG_INFO(0, cmd)
-    ZEND_ARG_VARIADIC_INFO(0, args)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_geoadd, 0, 0, 4)
-    ZEND_ARG_INFO(0, key)
-    ZEND_ARG_INFO(0, lng)
-    ZEND_ARG_INFO(0, lat)
-    ZEND_ARG_INFO(0, member)
-    ZEND_ARG_VARIADIC_INFO(0, other_triples)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_geodist, 0, 0, 3)
-    ZEND_ARG_INFO(0, key)
-    ZEND_ARG_INFO(0, src)
-    ZEND_ARG_INFO(0, dst)
-    ZEND_ARG_INFO(0, unit)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_georadius, 0, 0, 5)
-    ZEND_ARG_INFO(0, key)
-    ZEND_ARG_INFO(0, lng)
-    ZEND_ARG_INFO(0, lan)
-    ZEND_ARG_INFO(0, radius)
-    ZEND_ARG_INFO(0, unit)
-    ZEND_ARG_ARRAY_INFO(0, opts, 0)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_georadiusbymember, 0, 0, 4)
-    ZEND_ARG_INFO(0, key)
-    ZEND_ARG_INFO(0, member)
-    ZEND_ARG_INFO(0, radius)
-    ZEND_ARG_INFO(0, unit)
-    ZEND_ARG_ARRAY_INFO(0, opts, 0)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_xadd, 0, 0, 3)
-    ZEND_ARG_INFO(0, str_key)
-    ZEND_ARG_INFO(0, str_id)
-    ZEND_ARG_ARRAY_INFO(0, arr_fields, 0)
-    ZEND_ARG_INFO(0, i_maxlen)
-    ZEND_ARG_INFO(0, boo_approximate)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_xpending, 0, 0, 2)
-    ZEND_ARG_INFO(0, str_key)
-    ZEND_ARG_INFO(0, str_group)
-    ZEND_ARG_INFO(0, str_start)
-    ZEND_ARG_INFO(0, str_end)
-    ZEND_ARG_INFO(0, i_count)
-    ZEND_ARG_INFO(0, str_consumer)
-    ZEND_ARG_INFO(0, idle)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_xrange, 0, 0, 3)
-    ZEND_ARG_INFO(0, str_key)
-    ZEND_ARG_INFO(0, str_start)
-    ZEND_ARG_INFO(0, str_end)
-    ZEND_ARG_INFO(0, i_count)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_xread, 0, 0, 1)
-    ZEND_ARG_ARRAY_INFO(0, arr_streams, 0)
-    ZEND_ARG_INFO(0, i_count)
-    ZEND_ARG_INFO(0, i_block)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_xreadgroup, 0, 0, 3)
-    ZEND_ARG_INFO(0, str_group)
-    ZEND_ARG_INFO(0, str_consumer)
-    ZEND_ARG_ARRAY_INFO(0, arr_streams, 0)
-    ZEND_ARG_INFO(0, i_count)
-    ZEND_ARG_INFO(0, i_block)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_xack, 0, 0, 3)
-    ZEND_ARG_INFO(0, str_key)
-    ZEND_ARG_INFO(0, str_group)
-    ZEND_ARG_ARRAY_INFO(0, arr_ids, 0)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_xclaim, 0, 0, 5)
-    ZEND_ARG_INFO(0, str_key)
-    ZEND_ARG_INFO(0, str_group)
-    ZEND_ARG_INFO(0, str_consumer)
-    ZEND_ARG_INFO(0, i_min_idle)
-    ZEND_ARG_ARRAY_INFO(0, arr_ids, 0)
-    ZEND_ARG_ARRAY_INFO(0, arr_opts, 0)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_xgroup, 0, 0, 1)
-    ZEND_ARG_INFO(0, str_operation)
-    ZEND_ARG_INFO(0, str_key)
-    ZEND_ARG_INFO(0, str_arg1)
-    ZEND_ARG_INFO(0, str_arg2)
-    ZEND_ARG_INFO(0, str_arg3)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_xinfo, 0, 0, 1)
-    ZEND_ARG_INFO(0, str_cmd)
-    ZEND_ARG_INFO(0, str_key)
-    ZEND_ARG_INFO(0, str_group)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_xtrim, 0, 0, 2)
-    ZEND_ARG_INFO(0, str_key)
-    ZEND_ARG_INFO(0, i_maxlen)
-    ZEND_ARG_INFO(0, boo_approximate)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_xdel, 0, 0, 2)
-    ZEND_ARG_INFO(0, str_key)
-    ZEND_ARG_ARRAY_INFO(0, arr_ids, 0)
-ZEND_END_ARG_INFO()
 
 #endif

@@ -23,83 +23,41 @@
 zend_class_entry *redis_sentinel_ce;
 extern zend_class_entry *redis_exception_ce;
 
-ZEND_BEGIN_ARG_INFO_EX(arginfo_ctor, 0, 0, 1)
-    ZEND_ARG_INFO(0, host)
-    ZEND_ARG_INFO(0, port)
-    ZEND_ARG_INFO(0, timeout)
-    ZEND_ARG_INFO(0, persistent)
-    ZEND_ARG_INFO(0, retry_interval)
-    ZEND_ARG_INFO(0, read_timeout)
-ZEND_END_ARG_INFO()
+#if PHP_VERSION_ID < 80000
+#include "redis_sentinel_legacy_arginfo.h"
+#else
+#include "zend_attributes.h"
+#include "redis_sentinel_arginfo.h"
+#endif
 
-zend_function_entry redis_sentinel_functions[] = {
-     PHP_ME(RedisSentinel, __construct, arginfo_ctor, ZEND_ACC_PUBLIC)
-     PHP_ME(RedisSentinel, ckquorum, arginfo_value, ZEND_ACC_PUBLIC)
-     PHP_ME(RedisSentinel, failover, arginfo_value, ZEND_ACC_PUBLIC)
-     PHP_ME(RedisSentinel, flushconfig, arginfo_void, ZEND_ACC_PUBLIC)
-     PHP_ME(RedisSentinel, getMasterAddrByName, arginfo_value, ZEND_ACC_PUBLIC)
-     PHP_ME(RedisSentinel, master, arginfo_value, ZEND_ACC_PUBLIC)
-     PHP_ME(RedisSentinel, masters, arginfo_void, ZEND_ACC_PUBLIC)
-     PHP_ME(RedisSentinel, myid, arginfo_void, ZEND_ACC_PUBLIC)
-     PHP_ME(RedisSentinel, ping, arginfo_void, ZEND_ACC_PUBLIC)
-     PHP_ME(RedisSentinel, reset, arginfo_value, ZEND_ACC_PUBLIC)
-     PHP_ME(RedisSentinel, sentinels, arginfo_value, ZEND_ACC_PUBLIC)
-     PHP_ME(RedisSentinel, slaves, arginfo_value, ZEND_ACC_PUBLIC)
-     PHP_FE_END
-};
+PHP_MINIT_FUNCTION(redis_sentinel)
+{
+    /* RedisSentinel class */
+    redis_sentinel_ce = register_class_RedisSentinel();
+    redis_sentinel_ce->create_object = create_sentinel_object;
+    redis_class_deny_serialization(redis_sentinel_ce);
+
+    /* RedisSentinel object handler initialization */
+    redis_sentinel_init_object_handlers();
+
+    return SUCCESS;
+}
 
 PHP_METHOD(RedisSentinel, __construct)
 {
-    int persistent = 0;
-    char *persistent_id = NULL;
-    double timeout = 0.0, read_timeout = 0.0;
-    zend_long port = 26379, retry_interval = 0;
-    redis_sentinel_object *obj;
-    zend_string *host;
-    zval *auth = NULL, *zv = NULL;
+    HashTable *opts = NULL;
+    redis_sentinel_object *sentinel;
 
-    if (zend_parse_parameters(ZEND_NUM_ARGS(), "S|ldz!ldz",
-                                &host, &port, &timeout, &zv,
-                                &retry_interval, &read_timeout,
-                                &auth) == FAILURE) {
-        RETURN_FALSE;
-    }
+    ZEND_PARSE_PARAMETERS_START(0, 1)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_ARRAY_HT_OR_NULL(opts)
+    ZEND_PARSE_PARAMETERS_END_EX(RETURN_THROWS());
 
-    if (port < 0 || port > UINT16_MAX) {
-        REDIS_THROW_EXCEPTION("Invalid port", 0);
-        RETURN_FALSE;
-    }
-
-    if (timeout < 0L || timeout > INT_MAX) {
-        REDIS_THROW_EXCEPTION("Invalid connect timeout", 0);
-        RETURN_FALSE;
-    }
-
-    if (read_timeout < 0L || read_timeout > INT_MAX) {
-        REDIS_THROW_EXCEPTION("Invalid read timeout", 0);
-        RETURN_FALSE;
-    }
-
-    if (retry_interval < 0L || retry_interval > INT_MAX) {
-        REDIS_THROW_EXCEPTION("Invalid retry interval", 0);
-        RETURN_FALSE;
-    }
-
-    if (zv) {
-        ZVAL_DEREF(zv);
-        if (Z_TYPE_P(zv) == IS_STRING) {
-            persistent_id = Z_STRVAL_P(zv);
-            persistent = 1; /* even empty */
-        } else {
-            persistent = zval_is_true(zv);
-        }
-    }
-
-    obj = PHPREDIS_ZVAL_GET_OBJECT(redis_sentinel_object, getThis());
-    obj->sock = redis_sock_create(ZSTR_VAL(host), ZSTR_LEN(host), port,
-        timeout, read_timeout, persistent, persistent_id, retry_interval);
-    if (auth) {
-        redis_sock_set_auth_zval(obj->sock, auth);
+    sentinel = PHPREDIS_ZVAL_GET_OBJECT(redis_sentinel_object, getThis());
+    sentinel->sock = redis_sock_create(REDIS_SOCK_SENTINEL, ZEND_STRL("127.0.0.1"),
+                                       26379, 0, 0, 0, NULL, 0);
+    if (opts != NULL && redis_sock_configure(sentinel->sock, opts) != SUCCESS) {
+        RETURN_THROWS();
     }
 }
 
@@ -145,7 +103,7 @@ PHP_METHOD(RedisSentinel, ping)
 
 PHP_METHOD(RedisSentinel, reset)
 {
-    REDIS_PROCESS_KW_CMD("reset", redis_sentinel_str_cmd, redis_boolean_response);
+    REDIS_PROCESS_KW_CMD("reset", redis_sentinel_str_cmd, redis_long_response);
 }
 
 PHP_METHOD(RedisSentinel, sentinels)
